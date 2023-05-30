@@ -1,7 +1,6 @@
 DESTDIR =
 PREFIX  =/usr/local
 
-
 all:
 clean:
 install:
