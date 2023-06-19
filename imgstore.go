@@ -1,3 +1,6 @@
+// imgstore uses imagemagick to resize and convert the images
+// supplied by the user and stores them in a database (tested in
+// PostgreSQL).
 package imgstore
 
 import (
@@ -10,23 +13,25 @@ import (
 	"os"
 	"errors"
 	"strconv"
-	"database/sql"
 	"io"
 )
 
 type Image struct {
-	ID       int64   `db:"ID"        sql:"AUTO_INCREMENT" `
-	Format   string  `db:"FORMAT"    sql:"NOT NULL"       `
-	Data     []byte  `db:"DATA"      sql:"NOT NULL"       `
+	ID       int64   `db:"id"        sql:"AUTO_INCREMENT" `
+	Format   string  `db:"format"    sql:"NOT NULL"       `
+	Data     []byte  `db:"data"      sql:"NOT NULL"       `
 }
 
+// CreateTables creates the "images" table needed by imgstore.
 func CreateTables (db *sqlx.DB) (err error) {
 	_, err = db.Exec(`
+	-- SQL --
 	CREATE TABLE IF NOT EXISTS images (
-	    ID        INTEGER         PRIMARY KEY AUTOINCREMENT,
-	    FORMAT    VARCHAR(16)     NOT NULL,
-	    DATA      LONGBLOB        NOT NULL
-	)`)
+	    id        SERIAL          NOT NULL PRIMARY KEY,
+	    format    VARCHAR(16)     NOT NULL,
+	    data      BYTEA           NOT NULL
+	);
+	-- SQL --`)
 	return
 }
 
@@ -41,6 +46,8 @@ func init() {
 	}
 }
 
+// ConvertImageFile converts an image supplied by the user to "png"
+// with a maximun size of 512kB.
 func ConvertImageFile(size string, filename string, file io.Reader) (odata []byte, err error) {
 	var cmd    *exec.Cmd
 	var stdout  bytes.Buffer
@@ -49,7 +56,7 @@ func ConvertImageFile(size string, filename string, file io.Reader) (odata []byt
 	
 	suffix = filepath.Ext(filename)
 	switch suffix {
-	case ".jpg",".jpeg",".png":
+	case ".jpg",".jpeg",".png", ".JPG", ".JPEG", ".PNG":
 	default: err = errors.New("Invalid format"); return
 	}
 	
@@ -77,6 +84,8 @@ func ConvertImageFile(size string, filename string, file io.Reader) (odata []byt
 	return
 }
 
+// ConvertImage converts an image supplied by the user to "png"
+// with a maximun size of 512kB.
 func ConvertImage(size string, filename string, data []byte) (odata []byte, err error) {
 	var reader *bytes.Reader
 	if len(data) > 10 * 1024 * 1024 {
@@ -87,33 +96,60 @@ func ConvertImage(size string, filename string, data []byte) (odata []byte, err 
 	return ConvertImageFile(size, filename, reader)
 }
 
+// AddImageFile converts an image with "ConvertImageFile" and stores
+// it in the "images" table.
+func AddImageFile(db *sqlx.DB, size string, filename string, file io.Reader) (id int64, err error) {
+	var odata []byte
+	odata, err = ConvertImageFile(size, filename, file)
+	if err != nil {
+		return
+	}
+	return addImageRaw(db, odata)
+}
+
+// AddImage converts an image with "ConvertImageFile" and stores
+// it in the "images" table. Returns an ID.
 func AddImage(db *sqlx.DB, size string, filename string, data []byte) (id int64, err error) {
-	var odata   []byte
-	var res     sql.Result
-	
+	var odata []byte
 	odata, err = ConvertImage(size, filename, data)
 	if err != nil {
 		return
 	}
-	
-	res, err = db.Exec(`INSERT INTO images (FORMAT, DATA) VALUES (?, ?);`, convertFormat, odata)
+	return addImageRaw(db, odata)
+}
+
+
+func addImageRaw(db *sqlx.DB, odata []byte) (id int64, err error) {
+	var cmd string = `
+	-- SQL --
+	INSERT INTO images (format, data) VALUES ($1, $2) RETURNING id;
+	-- SQL --`
+	err = db.QueryRowx(cmd, convertFormat, odata).Scan(&id)
 	if err != nil {
+		log.Print("ERROR SQL: " + cmd)
 		return
 	}
-	id, err = res.LastInsertId()
-	if err != nil {
-		return
-	}
-	
+	log.Printf("Added new image: %v\n", id)
 	return
 }
 
+// GetImage reads the stored image from the database.
 func GetImage(db *sqlx.DB, id int64) (data []byte, format string, err error) {
-	err = db.QueryRowx(`SELECT FORMAT, DATA FROM images WHERE ID = ?;`, id).Scan(&format, &data)
+	var cmd string = `
+	-- SQL --
+	SELECT format, data FROM images WHERE id = $1;
+	-- SQL --`
+	err = db.QueryRowx(cmd, id).Scan(&format, &data)
+	if err != nil {
+		log.Print("ERROR SQL: " + cmd)
+		return
+	}
 	return
 }
 
-func AddImageFile(db *sqlx.DB, size string, filename string) (id int64, err error) {
+// AddImageFilename converts an image with "ConvertImageFile" and stores
+// it in the "images" table.
+func AddImageFilename(db *sqlx.DB, size string, filename string) (id int64, err error) {
 	var data []byte
 	data, err = os.ReadFile(filename)
 	if err != nil {
@@ -122,6 +158,7 @@ func AddImageFile(db *sqlx.DB, size string, filename string) (id int64, err erro
 	return AddImage(db, size, filename, data)
 }
 
+// AddRoute binds the "/imgstore/ID" route to the image store.
 func AddRoute(db *sqlx.DB, r *gin.Engine) {
 	r.GET("/imgstore/:id", func(c *gin.Context) {
 		var idS string
@@ -149,6 +186,8 @@ func AddRoute(db *sqlx.DB, r *gin.Engine) {
 	})
 }
 
+// GetRoute returns the route of an image ("/imgstore/ID").
 func GetRoute(id int64) string {
 	return "/imgstore/" + strconv.FormatInt(id, 10)
 }
+
